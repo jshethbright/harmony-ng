@@ -121,54 +121,52 @@ wpa_cli() {
 }
 """
 
-    def test_wifi_recovery_uses_elapsed_time_not_poll_count(self):
-        # Hundreds of polls before 30 seconds must not interrupt association.
+    def test_wifi_disconnect_never_forces_reassociation_or_restart(self):
         out = self.run_sh(self.WIFI_STUBS + """
-_now=0; monitor_wifi
-_i=0
-while [ "$_i" -lt 100 ]; do
-  _now=29; monitor_wifi
-  _i=$((_i + 1))
-done
-for _now in 30 31 59 60 61 99; do monitor_wifi; done
-cat wifi-actions
+killall() { echo "UNEXPECTED_KILL:$*"; }
+for _now in 0 3 9 30 60 100 300 900 3600 10000; do monitor_wifi; done
+_state=COMPLETED; _now=10001
+route() { echo '0.0.0.0 10.0.0.1 0.0.0.0 UG 0 0 0 ath0'; }
+monitor_wifi
+_state=ASSOCIATING; _now=20000; monitor_wifi
+[ ! -f wifi-actions ] || cat wifi-actions
 :
 """)
-        self.assertEqual(out.splitlines(), [
-            "ACTION:30:-i ath0 reconnect", "ACTION:60:-i ath0 reassociate"])
+        self.assertEqual(out, "")
 
-    def test_wifi_recovery_restarts_after_100_seconds_and_resets_on_connection(self):
-        # Replace only the absolute executable path; no host network operations.
-        fake = self.root / "wpa_supplicant"
-        fake.write_text("#!/bin/sh\nexit 0\n")
-        fake.chmod(0o755)
-        self.lib.write_text(self.lib.read_text().replace("/usr/sbin/wpa_supplicant", str(fake)))
+    def test_missing_ip_preserves_running_dhcp_client(self):
         out = self.run_sh(self.WIFI_STUBS + """
-killall() { echo "KILL:$_now:$*"; }
-sleep() { :; }
-route() { echo '0.0.0.0 10.0.0.1 0.0.0.0 UG 0 0 0 ath0'; }
-ping() { return 0; }
-_now=0; monitor_wifi
-_now=100; monitor_wifi
-_now=101; _state=COMPLETED; monitor_wifi
-_now=102; _state=ASSOCIATING; monitor_wifi
-_now=131; monitor_wifi
-_now=132; monitor_wifi
-cat wifi-actions
+_state=COMPLETED
+ifconfig() { :; }
+pidof() { echo 123; }
+killall() { echo "UNEXPECTED_KILL:$*"; }
+for _now in 0 3 30 60 100 300 900; do monitor_wifi; done
+[ ! -f wifi-actions ] || cat wifi-actions
 :
 """)
-        self.assertEqual(out.splitlines(), [
-            "KILL:100:-9 wpa_supplicant", "ACTION:132:-i ath0 reconnect"])
+        self.assertEqual(out, "")
 
-    def test_gateway_checks_wait_30_elapsed_seconds(self):
+    def test_gateway_checks_wait_30_seconds_without_ping_or_reset(self):
         out = self.run_sh(self.WIFI_STUBS + """
-route() { echo '0.0.0.0 10.0.0.1 0.0.0.0 UG 0 0 0 ath0'; }
-ping() { echo "PING:$_now" >> wifi-actions; return 0; }
+route() { echo "ROUTE:$_now" >> wifi-actions; echo '0.0.0.0 10.0.0.1 0.0.0.0 UG 0 0 0 ath0'; }
+ping() { echo "UNEXPECTED_PING" >> wifi-actions; return 1; }
+killall() { echo "UNEXPECTED_KILL:$*"; }
 _state=COMPLETED; gw_last_check=0
-for _now in 0 3 9 18 29 30 31 59 60; do monitor_wifi; done
+for _now in 0 3 9 18 29 30 31 59 60 90 120 150 180 210 240; do monitor_wifi; done
 cat wifi-actions
 """)
-        self.assertEqual(out.splitlines(), ["PING:30", "PING:60"])
+        self.assertEqual(out.splitlines(), [f"ROUTE:{t}" for t in range(30, 241, 30)])
+
+    def test_missing_gateway_restores_route_without_dhcp_restart(self):
+        out = self.run_sh(self.WIFI_STUBS + """
+route() { [ "$1" = "-n" ] || echo "ROUTE:$*"; }
+get_current_gw() { echo 10.0.0.1; }
+killall() { echo "UNEXPECTED_KILL:$*"; }
+pidof() { echo 123; }
+_state=COMPLETED; gw_last_check=0; _now=30
+monitor_wifi
+""")
+        self.assertEqual(out.splitlines(), ["ROUTE:add default gw 10.0.0.1 dev ath0"])
 
 
     def test_boot_without_link_starts_no_access_point(self):

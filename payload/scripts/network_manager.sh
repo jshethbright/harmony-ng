@@ -355,7 +355,7 @@ stop_eth() {
   fi
 }
 
-# Recovery deadlines use uptime: SNTP steps the wall clock after boot, and monitor
+# Route-check deadlines use uptime: SNTP steps the wall clock after boot, and monitor
 # iterations are not seconds (the loop sleeps 3 s and network probes take time).
 network_uptime() {
   read _net_uptime _net_rest < /proc/uptime
@@ -377,36 +377,10 @@ monitor_wifi() {
     sleep 2
   fi
 
-  # 3. Check WPA association status
+  # wpa_supplicant owns association and automatically retries when the AP returns.
+  # Do not interrupt scans/handshakes with reconnect, reassociate, or timed restarts.
   wpa_st=$(wpa_cli -i ath0 status 2>/dev/null | grep '^wpa_state=' | cut -d= -f2)
-  if [ "$wpa_st" != "COMPLETED" ]; then
-    _wifi_now=$(network_uptime)
-    if [ -z "${wifi_disc_since:-}" ]; then
-      wifi_disc_since=$_wifi_now
-      wifi_recovery_stage=0
-    fi
-    _wifi_elapsed=$((_wifi_now - wifi_disc_since))
-    if [ "$_wifi_elapsed" -ge 100 ]; then
-      log "Wi-Fi link stuck for >100s, restarting wpa_supplicant..."
-      killall -9 wpa_supplicant 2>/dev/null || true
-      sleep 1
-      /usr/sbin/wpa_supplicant -s -iath0 -c "$WPA_CONF" >/dev/null 2>&1 &
-      wifi_disc_since=$(network_uptime)
-      wifi_recovery_stage=0
-    elif [ "$_wifi_elapsed" -ge 60 ] && [ "${wifi_recovery_stage:-0}" -lt 2 ]; then
-      log "Wi-Fi state is '$wpa_st' for 60s, requesting reassociate..."
-      wpa_cli -i ath0 reassociate >/dev/null 2>&1 || true
-      wifi_recovery_stage=2
-    elif [ "$_wifi_elapsed" -ge 30 ] && [ "${wifi_recovery_stage:-0}" -lt 1 ]; then
-      log "Wi-Fi state is '$wpa_st' for 30s, requesting reconnect..."
-      wpa_cli -i ath0 reconnect >/dev/null 2>&1 || true
-      wifi_recovery_stage=1
-    fi
-    return 1
-  fi
-
-  wifi_disc_since=""
-  wifi_recovery_stage=0
+  [ "$wpa_st" = "COMPLETED" ] || return 1
 
   # 4. Check IP address on ath0
   wifi_ip=$(ifconfig ath0 2>/dev/null | grep 'inet addr' | awk -F: '{print $2}' | awk '{print $1}')
@@ -432,61 +406,26 @@ monitor_wifi() {
         fi
         ;;
     esac
-    dhcp_fail_count=$(expr "$dhcp_fail_count" + 1 2>/dev/null || echo 1)
-    if ! pidof udhcpc >/dev/null 2>&1 || [ "$dhcp_fail_count" -ge 2 ]; then
-      log "ath0 has no IP (fail count: $dhcp_fail_count), requesting DHCP lease..."
-      kill -9 $(cat /var/run/udhcpc.ath0.pid 2>/dev/null) 2>/dev/null || killall -9 udhcpc 2>/dev/null || true
-      rm -f /var/run/udhcpc.ath0.pid
+    # udhcpc already retries in the background. Preserve a running client.
+    if ! pidof udhcpc >/dev/null 2>&1; then
+      log "ath0 has no IP and no DHCP client, requesting a lease..."
       udhcpc -i ath0 -p /var/run/udhcpc.ath0.pid -b -t 5 -T 3 -A 15 >/dev/null 2>&1 &
-      dhcp_fail_count=0
     fi
     return 1
   fi
 
-  dhcp_fail_count=0
   case "$cur_state" in
     *:wifi-fallback:*) ;;
     *) echo "ath0:wifi:$wifi_ip" > "$STATE_FILE" ;;
   esac
 
-  # 5. Check Default Gateway connectivity every 30 elapsed seconds.
+  # 5. Repair a missing default route every 30 seconds; never probe/reset a live link.
   _gw_now=$(network_uptime)
   if [ "$((_gw_now - ${gw_last_check:-0}))" -ge 30 ]; then
     gw_last_check=$_gw_now
     gw=$(route -n 2>/dev/null | awk '$1=="0.0.0.0" && $8=="ath0" {print $2}')
-    if [ -n "$gw" ]; then
-      if ping -c 1 "$gw" >/dev/null 2>&1; then
-        gw_seen=1
-        gw_fail_count=0
-      else
-        case "$cur_state" in
-          *:wifi-fallback:*)
-            # In static fallback mode, gateway might be unreachable (switch off); do not restart DHCP or reassociate
-            ;;
-          *)
-            if [ "$gw_seen" = "1" ]; then
-              gw_fail_count=$(expr "$gw_fail_count" + 1 2>/dev/null || echo 1)
-              log "Gateway $gw ping failed ($gw_fail_count/5)"
-              if [ "$gw_fail_count" -eq 3 ]; then
-                if [ "$ETH_MODE" = "static" ]; then
-                  log "Gateway unreachable. Static IP mode: preserving IP on ath0..."
-                  [ -n "$ETH_GATEWAY" ] && route add default gw "$ETH_GATEWAY" dev ath0 2>/dev/null || true
-                else
-                  log "Gateway unreachable for 3 checks. Restarting DHCP on ath0..."
-                  kill -9 $(cat /var/run/udhcpc.ath0.pid 2>/dev/null) 2>/dev/null || killall -9 udhcpc 2>/dev/null || true
-                  rm -f /var/run/udhcpc.ath0.pid
-                  udhcpc -i ath0 -p /var/run/udhcpc.ath0.pid -b -t 5 -T 3 -A 15 >/dev/null 2>&1 &
-                fi
-              elif [ "$gw_fail_count" -ge 5 ]; then
-                log "Gateway unreachable for 5 checks. Reassociating Wi-Fi..."
-                wpa_cli -i ath0 reassociate >/dev/null 2>&1 || true
-                gw_fail_count=0
-              fi
-            fi
-            ;;
-        esac
-      fi
-    else
+    # A failed ping does not mean Wi-Fi is broken (routers can ignore ICMP).
+    if [ -z "$gw" ]; then
       case "$cur_state" in
         *:wifi-fallback:*)
           gw=$(get_current_gw)
@@ -494,18 +433,13 @@ monitor_wifi() {
           [ -n "$gw" ] && route add default gw "$gw" dev ath0 2>/dev/null || true
           ;;
         *)
-          no_gw_count=$(expr "$no_gw_count" + 1 2>/dev/null || echo 1)
-          if [ "$no_gw_count" -ge 2 ]; then
-            if [ "$ETH_MODE" = "static" ] && [ -n "$ETH_GATEWAY" ]; then
-              log "Restoring default gateway $ETH_GATEWAY on ath0..."
-              route add default gw "$ETH_GATEWAY" dev ath0 2>/dev/null || true
-            else
-              log "ath0 has IP $wifi_ip but no default gateway. Restarting DHCP..."
-              kill -9 $(cat /var/run/udhcpc.ath0.pid 2>/dev/null) 2>/dev/null || killall -9 udhcpc 2>/dev/null || true
-              rm -f /var/run/udhcpc.ath0.pid
-              udhcpc -i ath0 -p /var/run/udhcpc.ath0.pid -b -t 5 -T 3 -A 15 >/dev/null 2>&1 &
-            fi
-            no_gw_count=0
+          gw=$(get_current_gw)
+          if [ -n "$gw" ]; then
+            log "Restoring default gateway $gw on ath0..."
+            route add default gw "$gw" dev ath0 2>/dev/null || true
+          elif ! pidof udhcpc >/dev/null 2>&1; then
+            log "No default gateway or DHCP client; requesting a lease..."
+            udhcpc -i ath0 -p /var/run/udhcpc.ath0.pid -b -t 5 -T 3 -A 15 >/dev/null 2>&1 &
           fi
           ;;
       esac

@@ -4,13 +4,7 @@
 
 # Background watchdog: monitors Ethernet link, Wi-Fi failover, Wi-Fi health & DHCP
 run_monitor() {
-  wifi_disc_since=""
-  wifi_recovery_stage=0
-  dhcp_fail_count=0
-  gw_fail_count=0
-  no_gw_count=0
   gw_last_check=$(network_uptime)
-  gw_seen=0
 
   # Cache initial working gateway on startup
   get_current_gw >/dev/null 2>&1
