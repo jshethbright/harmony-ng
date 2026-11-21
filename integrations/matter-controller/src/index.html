@@ -1,0 +1,10 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HarmonyNG Matter</title><body>
+<h1>HarmonyNG Matter controller</h1>
+<p>Share an existing Matter device from Apple Home. Open the accessory’s settings and enable pairing mode, then enter the new setup code here. Do not factory-reset it.</p>
+<form id="login"><label>Controller token <input id="token" type="password" autocomplete="off" required></label><button>Connect</button></form>
+<form id="pair"><h2>Add a device</h2><label>Device id <input id="device" placeholder="living-room-lamp" pattern="[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}" required></label>
+<label>New Matter setup code <input id="code" type="password" autocomplete="off" required></label><button id="pairButton">Pair</button></form>
+<p id="status" role="status"></p><button id="refresh">Refresh devices</button><div id="devices"></div>
+<p>After adding a device to the Hub, include it in an activity or assign its PowerOn/PowerOff commands to remote buttons. Its current state remains available in Apple Home.</p>
+<script src="/app.js"></script></body></html>

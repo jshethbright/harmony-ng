@@ -1,0 +1,15 @@
+import { ServerNode, Endpoint, Environment, Logger } from '@matter/main';
+import { OnOffLightDevice } from '@matter/main/devices/on-off-light';
+import { writeFile, mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+Logger.level = 'error';
+const storage = await mkdtemp(`${tmpdir()}/harmony-virtual-light-`);
+Environment.default.vars.set('storage.path', storage);
+Environment.default.vars.set('mdns.networkInterface', process.env.MATTER_INTERFACE || 'en1');
+const node = await ServerNode.create({ id: 'virtual-light', network: { port: 5547 } });
+await node.add(new Endpoint(OnOffLightDevice, { id: 'lamp', onOff: { onOff: false } }));
+await node.start();
+await writeFile(process.env.CODE_FILE || '/tmp/harmony-virtual-light.json', JSON.stringify({ code: node.state.commissioning.pairingCodes.manualPairingCode }), { mode: 0o600 });
+console.log('Simulated Matter light ready');
+const timer = setInterval(() => writeFile(process.env.STATE_FILE || '/tmp/harmony-virtual-state.json', JSON.stringify({ on: node.parts.get('lamp').state.onOff.onOff })), 250);
+process.on('SIGTERM', async () => { clearInterval(timer); await node.close(); process.exit(0); });

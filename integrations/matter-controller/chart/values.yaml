@@ -1,0 +1,17 @@
+nodeImage: node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
+mosquittoImage: eclipse-mosquitto:2.0.22@sha256:81a6193ae693942a3231cd3ac52875b02b7e3a19da671b2fb4b55cc874c5b279
+existingSecret: harmony-matter-credentials
+auth:
+  enabled: false
+interface: eno2
+hubUrl: http://10.0.0.86:8089
+port: 8289
+storageClass: local-path
+storageSize: 1Gi
+nodeSelector: {}
+ingress:
+  enabled: true
+  className: traefik
+  host: matter.jitarth.com
+  clusterIssuer: letsencrypt-issuer
+  tlsSecret: harmony-matter-ingress-tls

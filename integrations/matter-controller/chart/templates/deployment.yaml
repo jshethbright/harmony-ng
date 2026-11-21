@@ -1,0 +1,119 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {app: {{ .Release.Name }}}
+  template:
+    metadata:
+      labels: {app: {{ .Release.Name }}}
+      annotations:
+        checksum/source: {{ include (print $.Template.BasePath "/config.yaml") . | sha256sum }}
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: prepare-storage
+          image: {{ .Values.nodeImage | quote }}
+          command: [sh, -c]
+          args:
+            - mkdir -p /data/matter /data/mosquitto /data/npm-cache /data/api; chown 1000:1000 /data/matter /data/npm-cache /app; chown 1000:2000 /data/api; chmod 770 /data/api; chown 1883:1883 /data/mosquitto; chmod 700 /data/matter /data/mosquitto /data/npm-cache; cp /credentials/mosquitto-passwordfile /data/mosquitto/passwordfile; chown 1883:1883 /data/mosquitto/passwordfile; chmod 600 /data/mosquitto/passwordfile
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: app, mountPath: /app}
+            - {name: credentials, mountPath: /credentials, readOnly: true}
+        - name: install-dependencies
+          image: {{ .Values.nodeImage | quote }}
+          securityContext: {runAsUser: 1000, runAsGroup: 1000, allowPrivilegeEscalation: false}
+          workingDir: /app
+          command: [sh, -ec]
+          args: ["cp -R /source/. /app/; npm ci --offline --omit=dev --ignore-scripts --no-audit --no-fund --cache /data/npm-cache || npm ci --prefer-offline --omit=dev --ignore-scripts --no-audit --no-fund --cache /data/npm-cache"]
+          volumeMounts:
+            - {name: source, mountPath: /source, readOnly: true}
+            - {name: app, mountPath: /app}
+            - {name: data, mountPath: /data}
+      containers:
+        - name: controller
+          image: {{ .Values.nodeImage | quote }}
+          workingDir: /app
+          command: [node, src/main.js]
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 2000
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          env:
+            - {name: API_SOCKET, value: /data/api/controller.sock}
+            - {name: MATTER_STORAGE_PATH, value: /data/matter}
+            - {name: MATTER_INTERFACE, value: {{ .Values.interface | quote }}}
+            - {name: HUB_URL, value: {{ .Values.hubUrl | quote }}}
+            - {name: MQTT_URL, value: 'mqtt://127.0.0.1:1883'}
+            - {name: MQTT_USER, value: harmony}
+            - name: MQTT_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.existingSecret }}, key: mqtt-password}
+            {{- if .Values.auth.enabled }}
+            - name: API_TOKEN
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.existingSecret }}, key: api-token}
+            {{- end }}
+          readinessProbe:
+            exec: {command: [node, src/probe.js, /readyz]}
+            initialDelaySeconds: 5
+          livenessProbe:
+            exec: {command: [node, src/probe.js, /healthz]}
+            initialDelaySeconds: 30
+            failureThreshold: 6
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: '1', memory: 512Mi}
+          volumeMounts:
+            - {name: app, mountPath: /app, readOnly: true}
+            - {name: data, mountPath: /data}
+        - name: mqtt
+          image: {{ .Values.mosquittoImage | quote }}
+          securityContext:
+            runAsUser: 1883
+            runAsGroup: 1883
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          ports:
+            - {name: mqtt, containerPort: 1883}
+          readinessProbe:
+            tcpSocket: {port: mqtt}
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 200m, memory: 64Mi}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: broker-config, mountPath: /mosquitto/config, readOnly: true}
+      volumes:
+        - name: app
+          emptyDir: {}
+        - name: data
+          persistentVolumeClaim: {claimName: {{ .Release.Name }}-data}
+        - name: source
+          configMap:
+            name: {{ .Release.Name }}-source
+            items:
+              {{- range $path, $_ := .Files.Glob "app/**" }}
+              - key: {{ $path | trimPrefix "app/" | replace "/" "_" | quote }}
+                path: {{ $path | trimPrefix "app/" | quote }}
+              {{- end }}
+        - name: broker-config
+          configMap: {name: {{ .Release.Name }}-mosquitto}
+        - name: credentials
+          secret:
+            secretName: {{ .Values.existingSecret }}
+            items:
+              - {key: mosquitto-passwordfile, path: mosquitto-passwordfile}
