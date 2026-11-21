@@ -16,8 +16,8 @@ hub_btstack's key pipe (tests/key_pipe_reader.py) and notes when each command ar
 Checks:
 1. Key channel (hub_key_channel.h), as hub_rf sends keys: two presses for one device 20 ms
    apart and a press for another device right after arrive without the 100 / 500 ms gaps; the
-   same key pressed again after 120 ms is not held back to 200 ms (holdInterKeyDelay), and a
-   duplicate 30 ms after a press is still dropped (the 90 ms filter is not changed).
+   same key pressed again after a release 30 ms later is neither dropped nor held
+   back to 200 ms (holdInterKeyDelay), preserving deliberate double-clicks.
 2. The same commands through POST /api/ir-send keep the gaps.
 3. A press that is 500 ms old is sent, one that is 1500 ms old is skipped (HUB_KEY_STALE_MS is
    1000; it was 300), and an old release always runs.
@@ -120,22 +120,19 @@ def main():
             time.sleep(1.0)
             pipe.clear()
             send_key(sock_path, 10, "7", "Select", "press")
+            send_key(sock_path, 11, "7", "Select", "release")
             time.sleep(0.030)
-            send_key(sock_path, 11, "7", "Select", "press")   # 30 ms after: a duplicate
-            time.sleep(0.090)
-            send_key(sock_path, 12, "7", "Select", "press")   # 120 ms after: a second press
-            cmds = pipe.wait(2)
+            send_key(sock_path, 12, "7", "Select", "press")
+            send_key(sock_path, 13, "7", "Select", "release")
+            cmds = pipe.wait(4)
             time.sleep(0.3)
             cmds = pipe.wait(0)
-            check([c["command"] for c in cmds] == ["KBD_DOWN 28", "KBD_DOWN 28"],
-                  "a press 30 ms after the same press is still dropped (90 ms duplicate filter)",
+            check([c["command"] for c in cmds] == ["KBD_DOWN 28", "RELEASE", "KBD_DOWN 28", "RELEASE"],
+                  "a quick double-click preserves both presses and releases",
                   str([c["command"] for c in cmds]))
-            if len(cmds) == 2:
-                g = gaps(cmds)
-                check(g[0] < 160, "the same key again after 120 ms: no 200 ms holdInterKeyDelay", "gap %.1f ms" % g[0])
-                print("       gap between the two presses in the pipe: %.1f ms" % g[0])
-            send_key(sock_path, 13, "7", "Select", "release")
-            pipe.wait(3)
+            if len(cmds) == 4:
+                gap = cmds[2]["ms"] - cmds[0]["ms"]
+                check(gap < 90, "double-click is not stretched by the inter-key delay", "gap %.1f ms" % gap)
 
             print("[*] POST /api/ir-send: the same commands keep the gaps")
             time.sleep(1.0)

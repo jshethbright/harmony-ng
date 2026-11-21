@@ -100,7 +100,10 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
                 // Classic GAP configuration
                 gap_set_local_name(g_host_name);
                 gap_set_class_of_device(0x0025C0); // Peripheral: Keyboard + Pointing Device
-                gap_set_default_link_policy_settings(LM_LINK_POLICY_ENABLE_ROLE_SWITCH | LM_LINK_POLICY_ENABLE_SNIFF_MODE);
+                /* The Hub is mains powered. Sniff adds host-dependent wake-up
+                 * latency and can bunch rapid Home clicks together. Keep classic
+                 * HID links active; BLE remote connection parameters are separate. */
+                gap_set_default_link_policy_settings(LM_LINK_POLICY_ENABLE_ROLE_SWITCH);
                 gap_set_allow_role_switch(true);
                 gap_ssp_set_enable(1);
                 gap_ssp_set_io_capability(SSP_IO_CAPABILITY_NO_INPUT_NO_OUTPUT);
@@ -865,7 +868,7 @@ int main(int argc, const char *argv[]) {
         .hid_reconnect_initiate = 1,
         .hid_normally_connectable = 1,
         .hid_boot_device = 1,
-        .hid_ssr_host_max_latency = 1600,
+        .hid_ssr_host_max_latency = 16, /* 10 ms, rather than the old 1 second */
         .hid_ssr_host_min_timeout = 3200,
         .hid_supervision_timeout = 3200,
         .hid_descriptor = hid_descriptor_composite,

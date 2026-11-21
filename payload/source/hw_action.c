@@ -737,7 +737,10 @@ static int send_match_in(const cJSON *root, const char *target, int match_mode, 
     /* 90ms debounce rejection: drop rapid duplicate press/tap pulses on the same button. The
      * window runs from the arrival of the previous accepted press or tap: it used to run from
      * the end of the last send or release, which dropped a real quick second press. */
-    if (action == HW_BTN_ACTION_TAP || action == HW_BTN_ACTION_PRESS) {
+    /* Physical keys supply press/release edges; a new press can be intentional
+     * even within 90 ms (e.g. Android TV Home double-click). Do not conflate
+     * those edges with duplicate synthetic/API commands. */
+    if (!g_live_remote_key && (action == HW_BTN_ACTION_TAP || action == HW_BTN_ACTION_PRESS)) {
         if (s_last_press_ms > 0 &&
             strcmp(s_last_press_dev, actual_dev_id) == 0 &&
             strcmp(s_last_press_cmd, command) == 0) {
