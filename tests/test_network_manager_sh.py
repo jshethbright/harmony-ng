@@ -109,6 +109,67 @@ class NetworkManagerScript(unittest.TestCase):
         out = self.run_sh('echo "W=$WPA_CONF"')
         self.assertIn(f"W={self.root}/etc/wpa_supplicant.ath0.conf\n", out)
 
+    WIFI_STUBS = """
+ps() { echo wpa_supplicant; }
+ifconfig() { echo 'inet addr:10.0.0.86'; }
+network_uptime() { echo "$_now"; }
+wpa_cli() {
+  case "$*" in
+    *status) echo "wpa_state=${_state:-ASSOCIATING}" ;;
+    *) echo "ACTION:$_now:$*" >> wifi-actions ;;
+  esac
+}
+"""
+
+    def test_wifi_recovery_uses_elapsed_time_not_poll_count(self):
+        # Hundreds of polls before 30 seconds must not interrupt association.
+        out = self.run_sh(self.WIFI_STUBS + """
+_now=0; monitor_wifi
+_i=0
+while [ "$_i" -lt 100 ]; do
+  _now=29; monitor_wifi
+  _i=$((_i + 1))
+done
+for _now in 30 31 59 60 61 99; do monitor_wifi; done
+cat wifi-actions
+:
+""")
+        self.assertEqual(out.splitlines(), [
+            "ACTION:30:-i ath0 reconnect", "ACTION:60:-i ath0 reassociate"])
+
+    def test_wifi_recovery_restarts_after_100_seconds_and_resets_on_connection(self):
+        # Replace only the absolute executable path; no host network operations.
+        fake = self.root / "wpa_supplicant"
+        fake.write_text("#!/bin/sh\nexit 0\n")
+        fake.chmod(0o755)
+        self.lib.write_text(self.lib.read_text().replace("/usr/sbin/wpa_supplicant", str(fake)))
+        out = self.run_sh(self.WIFI_STUBS + """
+killall() { echo "KILL:$_now:$*"; }
+sleep() { :; }
+route() { echo '0.0.0.0 10.0.0.1 0.0.0.0 UG 0 0 0 ath0'; }
+ping() { return 0; }
+_now=0; monitor_wifi
+_now=100; monitor_wifi
+_now=101; _state=COMPLETED; monitor_wifi
+_now=102; _state=ASSOCIATING; monitor_wifi
+_now=131; monitor_wifi
+_now=132; monitor_wifi
+cat wifi-actions
+:
+""")
+        self.assertEqual(out.splitlines(), [
+            "KILL:100:-9 wpa_supplicant", "ACTION:132:-i ath0 reconnect"])
+
+    def test_gateway_checks_wait_30_elapsed_seconds(self):
+        out = self.run_sh(self.WIFI_STUBS + """
+route() { echo '0.0.0.0 10.0.0.1 0.0.0.0 UG 0 0 0 ath0'; }
+ping() { echo "PING:$_now" >> wifi-actions; return 0; }
+_state=COMPLETED; gw_last_check=0
+for _now in 0 3 9 18 29 30 31 59 60; do monitor_wifi; done
+cat wifi-actions
+""")
+        self.assertEqual(out.splitlines(), ["PING:30", "PING:60"])
+
 
     def test_boot_without_link_starts_no_access_point(self):
         marker = self.root / "ap_started"

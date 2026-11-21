@@ -355,6 +355,13 @@ stop_eth() {
   fi
 }
 
+# Recovery deadlines use uptime: SNTP steps the wall clock after boot, and monitor
+# iterations are not seconds (the loop sleeps 3 s and network probes take time).
+network_uptime() {
+  read _net_uptime _net_rest < /proc/uptime
+  echo "${_net_uptime%%.*}"
+}
+
 monitor_wifi() {
   # 1. Ensure ath0 interface exists and is up
   if ! ifconfig ath0 >/dev/null 2>&1; then
@@ -373,24 +380,33 @@ monitor_wifi() {
   # 3. Check WPA association status
   wpa_st=$(wpa_cli -i ath0 status 2>/dev/null | grep '^wpa_state=' | cut -d= -f2)
   if [ "$wpa_st" != "COMPLETED" ]; then
-    wifi_disc_count=$(expr "$wifi_disc_count" + 1 2>/dev/null || echo 1)
-    if [ "$wifi_disc_count" -eq 3 ]; then
-      log "Wi-Fi state is '$wpa_st' for 30s, requesting reconnect..."
-      wpa_cli -i ath0 reconnect >/dev/null 2>&1 || true
-    elif [ "$wifi_disc_count" -eq 6 ]; then
-      log "Wi-Fi state is '$wpa_st' for 60s, requesting reassociate..."
-      wpa_cli -i ath0 reassociate >/dev/null 2>&1 || true
-    elif [ "$wifi_disc_count" -ge 10 ]; then
+    _wifi_now=$(network_uptime)
+    if [ -z "${wifi_disc_since:-}" ]; then
+      wifi_disc_since=$_wifi_now
+      wifi_recovery_stage=0
+    fi
+    _wifi_elapsed=$((_wifi_now - wifi_disc_since))
+    if [ "$_wifi_elapsed" -ge 100 ]; then
       log "Wi-Fi link stuck for >100s, restarting wpa_supplicant..."
-      killall wpa_supplicant 2>/dev/null || true
+      killall -9 wpa_supplicant 2>/dev/null || true
       sleep 1
       /usr/sbin/wpa_supplicant -s -iath0 -c "$WPA_CONF" >/dev/null 2>&1 &
-      wifi_disc_count=0
+      wifi_disc_since=$(network_uptime)
+      wifi_recovery_stage=0
+    elif [ "$_wifi_elapsed" -ge 60 ] && [ "${wifi_recovery_stage:-0}" -lt 2 ]; then
+      log "Wi-Fi state is '$wpa_st' for 60s, requesting reassociate..."
+      wpa_cli -i ath0 reassociate >/dev/null 2>&1 || true
+      wifi_recovery_stage=2
+    elif [ "$_wifi_elapsed" -ge 30 ] && [ "${wifi_recovery_stage:-0}" -lt 1 ]; then
+      log "Wi-Fi state is '$wpa_st' for 30s, requesting reconnect..."
+      wpa_cli -i ath0 reconnect >/dev/null 2>&1 || true
+      wifi_recovery_stage=1
     fi
     return 1
   fi
 
-  wifi_disc_count=0
+  wifi_disc_since=""
+  wifi_recovery_stage=0
 
   # 4. Check IP address on ath0
   wifi_ip=$(ifconfig ath0 2>/dev/null | grep 'inet addr' | awk -F: '{print $2}' | awk '{print $1}')
@@ -433,10 +449,10 @@ monitor_wifi() {
     *) echo "ath0:wifi:$wifi_ip" > "$STATE_FILE" ;;
   esac
 
-  # 5. Check Default Gateway connectivity every ~30 seconds (every 3rd cycle)
-  ping_check_cycle=$(expr "$ping_check_cycle" + 1 2>/dev/null || echo 1)
-  if [ "$ping_check_cycle" -ge 3 ]; then
-    ping_check_cycle=0
+  # 5. Check Default Gateway connectivity every 30 elapsed seconds.
+  _gw_now=$(network_uptime)
+  if [ "$((_gw_now - ${gw_last_check:-0}))" -ge 30 ]; then
+    gw_last_check=$_gw_now
     gw=$(route -n 2>/dev/null | awk '$1=="0.0.0.0" && $8=="ath0" {print $2}')
     if [ -n "$gw" ]; then
       if ping -c 1 "$gw" >/dev/null 2>&1; then
